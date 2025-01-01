@@ -17,21 +17,7 @@ from urllib3.exceptions import ProtocolError
 from osmnx._errors import InsufficientResponseError  # Use with caution
 import concurrent.futures
 
-# (Optional) for ERA5 download via CDS
-try:
-    import cdsapi
-except ImportError:
-    pass
 
-# -------------------------------
-# 0. Memory Profiling (Optional)
-# -------------------------------
-# To use memory profiling, uncomment the following lines and decorate functions with @profile
-# from memory_profiler import profile
-
-# -------------------------------
-# 1. Configuration and Settings
-# -------------------------------
 
 OVERPASS_SERVERS = [
     "https://overpass-api.de/api/interpreter",
@@ -39,14 +25,12 @@ OVERPASS_SERVERS = [
     "https://overpass.openstreetmap.ru/api/interpreter"
 ]
 
-# Configure OSMnx settings
-ox.settings.use_cache = True
-ox.settings.log_console = False  # Disable console logging to save memory
-ox.settings.timeout = 60  # Set a reasonable timeout for OSM queries
 
-# -------------------------------
-# 2. Utility Functions
-# -------------------------------
+ox.settings.use_cache = True
+ox.settings.log_console = False  
+ox.settings.timeout = 60  
+
+
 
 def split_polygon_into_grid(gdf, grid_size_km=50):
     """
@@ -57,7 +41,7 @@ def split_polygon_into_grid(gdf, grid_size_km=50):
         grid_size_km: Size of each grid cell in kilometers.
     """
     # Project to a suitable CRS (e.g., UTM zone for Texas)
-    gdf_proj = gdf.to_crs(epsg=32614)  # UTM zone 14N
+    gdf_proj = gdf.to_crs(epsg=32614)  # (distance based)
 
     minx, miny, maxx, maxy = gdf_proj.total_bounds
     grid_size_m = grid_size_km * 1000
@@ -74,7 +58,7 @@ def split_polygon_into_grid(gdf, grid_size_km=50):
     grid = gpd.GeoDataFrame({'geometry': grid_cells}, crs=gdf_proj.crs)
     grid_clipped = gpd.overlay(grid, gdf_proj, how='intersection')
     grid_clipped.sindex  # Trigger spatial indexing
-    return grid_clipped.to_crs(epsg=4326)  # Back to WGS84
+    return grid_clipped.to_crs(epsg=4326)  # Back to WGS84 (lat lon based)
 
 
 def _fetch_buildings_for_polygon(grid_polygon, idx, max_retries=3, sleep_time=5):
@@ -83,22 +67,22 @@ def _fetch_buildings_for_polygon(grid_polygon, idx, max_retries=3, sleep_time=5)
     Retries on transient errors; rotates between multiple Overpass servers.
     """
     buildings = gpd.GeoDataFrame()
-    server_index = 0  # Start with the first server
+    server_index = 0
     num_servers = len(OVERPASS_SERVERS)
 
     for attempt in range(1, max_retries + 1):
         try:
-            # Set the current Overpass server
+
             ox.settings.overpass_endpoint = OVERPASS_SERVERS[server_index]
             print(f"Grid Cell {idx}: Using Overpass server: {OVERPASS_SERVERS[server_index]}")
 
-            # Fetch building data with limited fields to save memory
+            # Only building data to save memory
             buildings = ox.features.features_from_polygon(
                 grid_polygon, 
                 tags={'building': True}
             )
 
-            # Exit loop on success
+
             if not buildings.empty:
                 print(f"Grid Cell {idx}: Successfully fetched {len(buildings)} buildings.")
             else:
@@ -107,7 +91,7 @@ def _fetch_buildings_for_polygon(grid_polygon, idx, max_retries=3, sleep_time=5)
         except (RequestException, ProtocolError, InsufficientResponseError) as e:
             print(f"Grid Cell {idx} Attempt {attempt} failed: {e}")
             if attempt < max_retries:
-                # Rotate to the next server
+
                 server_index = (server_index + 1) % num_servers
                 print(f"Retrying with a different server in {sleep_time} seconds...")
                 time.sleep(sleep_time)
@@ -121,13 +105,12 @@ def optimize_data_types(gdf):
     Optimize data types of a GeoDataFrame to save memory.
     Converts numerical columns to float32 and categorical columns to category.
     """
-    # Convert numeric columns to float32
+
     float_cols = ['Value_USD', 'Latitude', 'Longitude', 'Distance_km', 'Damage_%', 'Loss_USD']
     for col in float_cols:
         if col in gdf.columns:
             gdf[col] = gdf[col].astype('float32')
 
-    # Convert object columns to category if they have limited unique values
     category_cols = ['Building_Type']
     for col in category_cols:
         if col in gdf.columns:
@@ -140,8 +123,8 @@ def sanitize_columns(gdf):
     """
     Cleans and shortens column names to avoid conflicts with GeoPackage.
     """
-    gdf.columns = [col[:63] if len(col) > 63 else col for col in gdf.columns]  # Shorten long names
-    gdf.columns = [col.replace(":", "_").replace("-", "_").replace(" ", "_") for col in gdf.columns]  # Sanitize names
+    gdf.columns = [col[:63] if len(col) > 63 else col for col in gdf.columns]
+    gdf.columns = [col.replace(":", "_").replace("-", "_").replace(" ", "_") for col in gdf.columns]
     gdf = gdf.loc[:, ~gdf.columns.duplicated()]  # Remove duplicate columns
     return gdf
 
@@ -176,7 +159,6 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
         print(f"Total buildings loaded from cache: {len(combined_buildings)}")
         return combined_buildings
 
-    # 1. Get boundary of Texas
     try:
         print(f"Fetching boundary for {place_name}...")
         gdf_place = ox.geocode_to_gdf(place_name)
@@ -185,12 +167,12 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
         print(f"Error fetching boundary: {e}")
         return gpd.GeoDataFrame()
 
-    # 2. Create grid
+
     print(f"Splitting '{place_name}' into {grid_size_km} km grid cells...")
     grid_clipped = split_polygon_into_grid(gdf_place, grid_size_km=grid_size_km)
     print(f"Total grids created: {len(grid_clipped)}")
 
-    # 3. Parallel fetch in batches
+
     all_buildings = []
     total_grids = len(grid_clipped)
     print(f"Total grids to process: {total_grids}")
@@ -229,13 +211,11 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
             batch_num = start // batch_size + 1
             batch_filename = f"batch_{idx}.gpkg"
             save_to_geopackage(combined_batch, batch_filename, layer='buildings')
-            # batch_filename = f'texas_buildings_batch_{batch_num}.gpkg'
-            # combined_batch.to_file(batch_filename, driver='GPKG', encoding='UTF-8', layer='buildings')
             print(f"Batch {batch_num} saved as '{batch_filename}'.")
-            all_buildings = []  # Clear list to free memory
-            gc.collect()  # Force garbage collection
+            all_buildings = []
+            gc.collect()
 
-    # 4. Combine all batch files
+
     combined_buildings = gpd.GeoDataFrame()
     for start in range(0, total_grids, batch_size):
         batch_num = start // batch_size + 1
@@ -244,17 +224,17 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
             batch_gdf = gpd.read_file(batch_file)
             combined_buildings = pd.concat([combined_buildings, batch_gdf], ignore_index=True)
             print(f"Batch {batch_num} loaded from '{batch_file}'.")
-            os.remove(batch_file)  # Delete batch file after combining to save disk space
+            os.remove(batch_file) 
             print(f"Batch file '{batch_file}' removed.")
     
     if not combined_buildings.empty:
         combined_buildings = gpd.GeoDataFrame(combined_buildings, crs="EPSG:4326")
         print(f"\nTotal buildings fetched: {len(combined_buildings)}")
 
-        # Optimize data types to save memory
+
         combined_buildings = optimize_data_types(combined_buildings)
 
-        # Post-processing
+
         combined_buildings.reset_index(drop=True, inplace=True)
 
         # Unique ID
@@ -270,7 +250,7 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
 
         combined_buildings.dropna(subset=['geometry'], inplace=True)
 
-        # Synthetic asset values
+        # Unreal or fabricated asset values
         value_ranges = {
             'residential': (100000, 500000),
             'commercial': (200000, 1000000),
@@ -293,7 +273,7 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
         combined_buildings['Latitude'] = centroids_geo['centroid'].y.astype('float32')
         combined_buildings['Longitude'] = centroids_geo['centroid'].x.astype('float32')
 
-        # Save to cache
+
         combined_buildings.to_file(cache_filename, driver='GPKG', encoding='UTF-8', layer='buildings', compress=True)
         print(f"Building data saved to '{cache_filename}'.")
     else:
@@ -302,12 +282,12 @@ def get_osm_buildings(place_name="Texas, USA", grid_size_km=50,
         )
         print("No buildings fetched.")
 
-    # Final garbage collection
+
     gc.collect()
     return combined_buildings
 
 
-ERA5_FILEPATH = 'era5_Harvey_aug23-31_2017_extended.nc'  # Update if necessary
+ERA5_FILEPATH = 'era5_Harvey_aug23-31_2017_extended.nc'
 
 LANDFALL_DETECTION_METHOD = 'max_wind'
 
@@ -322,19 +302,19 @@ def open_and_prepare_dataset(filepath=ERA5_FILEPATH):
     
     ds = xr.open_dataset(filepath, chunks={'time': 10})
     
-    # If the dataset uses 'valid_time' instead of 'time', rename it.
+
     if 'valid_time' in ds.coords:
         ds = ds.rename({'valid_time': 'time'})
     
-    # Ensure we have 'u10' and 'v10'
+
     if 'u10' not in ds.data_vars or 'v10' not in ds.data_vars:
         raise ValueError("Missing 'u10' or 'v10' in the dataset. Adjust variable names if needed.")
 
-    # Calculate wind speed (m/s -> kph)
+
     ds['wind_speed_mps'] = np.sqrt(ds['u10']**2 + ds['v10']**2)
     ds['wind_speed_kph'] = ds['wind_speed_mps'] * 3.6
 
-    # Attempt wind gust
+
     if 'i10fg' in ds.data_vars:
         ds['wind_gust_kph'] = ds['i10fg'] * 3.6
     elif '10si' in ds.data_vars:
@@ -342,7 +322,7 @@ def open_and_prepare_dataset(filepath=ERA5_FILEPATH):
     else:
         ds['wind_gust_kph'] = np.nan
     
-    # Attempt MSL in hPa
+
     if 'msl' in ds.data_vars:
         ds['msl_hPa'] = ds['msl'] / 100.0
     else:
@@ -363,7 +343,7 @@ def identify_landfall(df, method='max_wind'):
     if 'time' not in df.columns:
         raise KeyError("No 'time' column found in DataFrame. Check the rename steps!")
     
-    # Group by 'time'
+
     grouped = df.groupby('time', group_keys=True)
     
     if method == 'max_wind':
@@ -375,7 +355,7 @@ def identify_landfall(df, method='max_wind'):
     else:
         raise ValueError("method must be 'max_wind' or 'min_mslp'")
     
-    # Convert to a single-row DataFrame
+
     landfall_df = pd.DataFrame([{
         'Cyclone_ID': 1,
         'Method': method,
@@ -397,21 +377,21 @@ def plot_cyclone_features_at_landfall_point(df, landfall_df):
     sns.set(style="whitegrid")
     plt.figure(figsize=(16, 12))
 
-    # Extract the landfall location (lat, lon)
+
     landfall_lat = landfall_df.iloc[0]['Latitude']
     landfall_lon = landfall_df.iloc[0]['Longitude']
 
-    # Filter the data for the landfall grid point
+
     landfall_grid_df = df[(df['latitude'] == landfall_lat) & (df['longitude'] == landfall_lon)]
 
     if landfall_grid_df.empty:
         print("No data available for the grid point where landfall occurs.")
         return
 
-    # Sort by time for consistent plotting
+
     landfall_grid_df = landfall_grid_df.sort_values(by='time')
 
-    # 1. Wind Speed
+    # Wind Speed
     plt.subplot(3, 1, 1)
     sns.lineplot(
         data=landfall_grid_df,
@@ -432,7 +412,7 @@ def plot_cyclone_features_at_landfall_point(df, landfall_df):
     plt.ylabel("Wind Speed (kph)")
     plt.legend()
 
-    # 2. Wind Gust
+    # Wind Gust
     plt.subplot(3, 1, 2)
     if 'wind_gust_kph' in landfall_grid_df.columns and landfall_grid_df['wind_gust_kph'].notna().any():
         sns.lineplot(
@@ -457,7 +437,7 @@ def plot_cyclone_features_at_landfall_point(df, landfall_df):
         plt.text(0.5, 0.5, "No Wind Gust Data Available", ha='center', va='center', fontsize=14)
         plt.axis('off')
 
-    # 3. MSLP
+    # MSLP
     plt.subplot(3, 1, 3)
     if 'msl_hPa' in landfall_grid_df.columns and landfall_grid_df['msl_hPa'].notna().any():
         sns.lineplot(
@@ -542,14 +522,13 @@ def calculate_losses(assets_gdf, cyclone_df, radius_km=160):
         lon = cyclone['Longitude']
         center_point = Point(lon, lat)
 
-        # Project to UTM for accurate distance calculations
         assets_gdf_proj = assets_gdf.to_crs(epsg=32614)
         center_point_proj = gpd.GeoSeries([center_point], crs="EPSG:4326").to_crs(epsg=32614).iloc[0]
 
-        # Distance in km
+
         assets_gdf_proj['Distance_km'] = assets_gdf_proj.geometry.distance(center_point_proj) / 1000.0
 
-        # Damage calculation
+
         assets_gdf_proj['Damage_%'] = assets_gdf_proj.apply(
             lambda row: calculate_damage_percentage_kph(
                 wind_speed_kph=wind_speed,
@@ -675,12 +654,9 @@ def create_interactive_map(assets_gdf, cyclone_df, radius_km=160):
     gc.collect()
 
 
-# -------------------------------
-# 3. Main Execution Function
-# -------------------------------
 
 def main():
-    # 1. Fetch OSM Building Data for Texas
+    # Fetch OSM Building Data for Texas
     print("Fetching OSM building data for Texas...")
     assets_gdf = get_osm_buildings(
         place_name="Texas, USA",
@@ -696,34 +672,35 @@ def main():
     print("\nSample Buildings:")
     print(assets_gdf.head())
 
-    # 2. Process ERA5 Data for Cyclone Analysis
+    # Process ERA5 Data for Cyclone Analysis
     print("\nProcessing ERA5 data for Hurricane Harvey...")
     ds = open_and_prepare_dataset(ERA5_FILEPATH)
     df = ds[['wind_speed_kph', 'wind_gust_kph', 'msl_hPa', 'latitude', 'longitude', 'time']].to_dataframe().reset_index()
     landfall_df = identify_landfall(df, method=LANDFALL_DETECTION_METHOD)
     print_cyclone_summary(landfall_df)
 
-    # 3. Plot Cyclone Features at Landfall Grid Point
+    # Plot Cyclone Features at Landfall Grid Point
     plot_cyclone_features_at_landfall_point(df, landfall_df)
 
-    # 4. Calculate Losses
+    # Calculate Losses
     print("\nCalculating losses based on Hurricane Harvey impact...")
     loss_df, updated_assets_gdf = calculate_losses(assets_gdf, landfall_df, radius_km=160)
     print("\nLoss Summary:")
     print(loss_df)
 
-    # 5. Plot Loss Summary
+    # Plot Loss Summary
     if not loss_df.empty:
         create_loss_summary_plot(loss_df)
     else:
         print("No loss data to plot.")
 
-    # 6. Interactive Map
+    # Interactive Map
     if not updated_assets_gdf.empty and not landfall_df.empty:
         create_interactive_map(updated_assets_gdf, landfall_df, radius_km=160)
     else:
         print("Insufficient data for interactive map.")
 
-# Entry Point
+
+
 if __name__ == "__main__":
     main()
